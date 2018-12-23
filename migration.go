@@ -19,7 +19,7 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 		panic("migrate: invalid params: ApplicationID can't be empty string")
 	}
 
-	p.Database.ExecContext(ctx, ``+
+	if _, err := p.Database.ExecContext(ctx, ``+
 		`create table if not exists `+
 		`__meta(key text primary key, value text);`+
 
@@ -27,7 +27,10 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 		`('application_id', ''), `+
 		`('user_version', '0') `+
 		`on conflict do nothing;`,
-	)
+	); err != nil {
+		p.ErrorLog.Println(err)
+		return err
+	}
 
 	conn, err := p.Database.Conn(ctx)
 	if err != nil {
