@@ -15,6 +15,7 @@ type MigrateParam struct {
 }
 
 func Migrate(ctx context.Context, p MigrateParam) error {
+	errLog := p.ErrorLog
 	if p.ApplicationID == "" {
 		panic("migrate: invalid params: ApplicationID can't be empty string")
 	}
@@ -28,13 +29,17 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 		`('user_version', '0') `+
 		`on conflict do nothing;`,
 	); err != nil {
-		p.ErrorLog.Println(err)
+		if errLog != nil {
+			errLog.Println(err)
+		}
 		return err
 	}
 
 	conn, err := p.Database.Conn(ctx)
 	if err != nil {
-		p.ErrorLog.Println(err)
+		if errLog != nil {
+			errLog.Println(err)
+		}
 		return err
 	}
 	defer conn.Close()
@@ -42,7 +47,9 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 	if _, err := conn.ExecContext(ctx,
 		"begin isolation level serializable;",
 	); err != nil {
-		p.ErrorLog.Println(err)
+		if errLog != nil {
+			errLog.Println(err)
+		}
 		return err
 	}
 	commited := false
@@ -56,7 +63,9 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 	if err := conn.QueryRowContext(ctx,
 		"select value from __meta where key='application_id';",
 	).Scan(&curAppID); err != nil {
-		p.ErrorLog.Println(err)
+		if errLog != nil {
+			errLog.Println(err)
+		}
 		return err
 	}
 	if curAppID == "" {
@@ -64,7 +73,9 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 			"update __meta set value=$1 where key='application_id';",
 			p.ApplicationID,
 		); err != nil {
-			p.ErrorLog.Println(err)
+			if errLog != nil {
+				errLog.Println(err)
+			}
 			return err
 		}
 		curAppID = p.ApplicationID
@@ -77,13 +88,17 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 	if err := conn.QueryRowContext(ctx,
 		"select value from __meta where key='user_version';",
 	).Scan(&userVersion); err != nil {
-		p.ErrorLog.Println(err)
+		if errLog != nil {
+			errLog.Println(err)
+		}
 		return err
 	}
 	for ; userVersion < len(p.Statements); userVersion++ {
 		statement := p.Statements[userVersion]
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
-			p.ErrorLog.Println(err)
+			if errLog != nil {
+				errLog.Println(err)
+			}
 			return err
 		}
 	}
@@ -91,12 +106,16 @@ func Migrate(ctx context.Context, p MigrateParam) error {
 		"update __meta set value=$1 where key='user_version';",
 		userVersion,
 	); err != nil {
-		p.ErrorLog.Println(err)
+		if errLog != nil {
+			errLog.Println(err)
+		}
 		return err
 	}
 
 	if _, err := conn.ExecContext(ctx, "commit"); err != nil {
-		p.ErrorLog.Println(err)
+		if errLog != nil {
+			errLog.Println(err)
+		}
 		return err
 	}
 	commited = true
