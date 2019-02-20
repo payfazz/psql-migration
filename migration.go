@@ -7,14 +7,16 @@ import (
 	"log"
 )
 
-type MigrateParam struct {
+// MigrateParam for Migrate
+type MigrateParams struct {
 	Database      *sql.DB
 	ErrorLog      *log.Logger
 	ApplicationID string
 	Statements    []string
 }
 
-func Migrate(ctx context.Context, p MigrateParam) error {
+// Migrate do the sql migration
+func Migrate(ctx context.Context, p MigrateParams) error {
 	errLog := p.ErrorLog
 	if p.ApplicationID == "" {
 		panic("migrate: invalid params: ApplicationID can't be empty string")
