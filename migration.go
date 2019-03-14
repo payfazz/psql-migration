@@ -4,25 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 )
 
-// MigrateParam for Migrate
-type MigrateParams struct {
-	Database      *sql.DB
-	ErrorLog      *log.Logger
-	ApplicationID string
-	Statements    []string
-}
-
 // Migrate do the sql migration
-func Migrate(ctx context.Context, p MigrateParams) error {
-	errLog := p.ErrorLog
-	if p.ApplicationID == "" {
+func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string) error {
+	if appID == "" {
 		panic("migrate: invalid params: ApplicationID can't be empty string")
 	}
 
-	if _, err := p.Database.ExecContext(ctx, ``+
+	if _, err := db.ExecContext(ctx, ``+
 		`create table if not exists `+
 		`__meta(key text primary key, value text);`+
 
@@ -31,17 +21,11 @@ func Migrate(ctx context.Context, p MigrateParams) error {
 		`('user_version', '0') `+
 		`on conflict do nothing;`,
 	); err != nil {
-		if errLog != nil {
-			errLog.Println(err)
-		}
 		return err
 	}
 
-	conn, err := p.Database.Conn(ctx)
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		if errLog != nil {
-			errLog.Println(err)
-		}
 		return err
 	}
 	defer conn.Close()
@@ -49,9 +33,6 @@ func Migrate(ctx context.Context, p MigrateParams) error {
 	if _, err := conn.ExecContext(ctx,
 		"begin isolation level serializable;",
 	); err != nil {
-		if errLog != nil {
-			errLog.Println(err)
-		}
 		return err
 	}
 	commited := false
@@ -65,24 +46,18 @@ func Migrate(ctx context.Context, p MigrateParams) error {
 	if err := conn.QueryRowContext(ctx,
 		"select value from __meta where key='application_id';",
 	).Scan(&curAppID); err != nil {
-		if errLog != nil {
-			errLog.Println(err)
-		}
 		return err
 	}
 	if curAppID == "" {
 		if _, err := conn.ExecContext(ctx,
 			"update __meta set value=$1 where key='application_id';",
-			p.ApplicationID,
+			appID,
 		); err != nil {
-			if errLog != nil {
-				errLog.Println(err)
-			}
 			return err
 		}
-		curAppID = p.ApplicationID
+		curAppID = appID
 	}
-	if curAppID != p.ApplicationID {
+	if curAppID != appID {
 		return fmt.Errorf("Invalid application_id on database")
 	}
 
@@ -90,17 +65,11 @@ func Migrate(ctx context.Context, p MigrateParams) error {
 	if err := conn.QueryRowContext(ctx,
 		"select value from __meta where key='user_version';",
 	).Scan(&userVersion); err != nil {
-		if errLog != nil {
-			errLog.Println(err)
-		}
 		return err
 	}
-	for ; userVersion < len(p.Statements); userVersion++ {
-		statement := p.Statements[userVersion]
+	for ; userVersion < len(statements); userVersion++ {
+		statement := statements[userVersion]
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
-			if errLog != nil {
-				errLog.Println(err)
-			}
 			return err
 		}
 	}
@@ -108,16 +77,10 @@ func Migrate(ctx context.Context, p MigrateParams) error {
 		"update __meta set value=$1 where key='user_version';",
 		userVersion,
 	); err != nil {
-		if errLog != nil {
-			errLog.Println(err)
-		}
 		return err
 	}
 
 	if _, err := conn.ExecContext(ctx, "commit"); err != nil {
-		if errLog != nil {
-			errLog.Println(err)
-		}
 		return err
 	}
 	commited = true
