@@ -9,7 +9,7 @@ import (
 // Migrate do the sql migration
 func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string) error {
 	if appID == "" {
-		panic("migrate: invalid params: ApplicationID can't be empty string")
+		panic("migrate: invalid params: appID can't be empty string")
 	}
 
 	if _, err := db.ExecContext(ctx, ``+
@@ -30,8 +30,9 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx,
-		"begin isolation level serializable;",
+	if _, err := conn.ExecContext(ctx, ``+
+		`begin isolation level serializable;`+
+		`lock table __meta in access exclusive mode;`,
 	); err != nil {
 		return err
 	}
