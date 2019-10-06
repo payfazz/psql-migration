@@ -16,10 +16,9 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 		`create table if not exists `+
 		`__meta(key text primary key, value text);`+
 
-		`insert into __meta(key, value) values `+
-		`('application_id', ''), `+
-		`('user_version', '0') `+
-		`on conflict do nothing;`,
+		`with d(k, v) as (values ('application_id', ''), ('user_version', '0')) `+
+		`insert into __meta(key, value) `+
+		`select k, v from d where not exists (select 1 from __meta where key = k);`,
 	); err != nil {
 		return err
 	}
