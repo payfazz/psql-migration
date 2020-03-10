@@ -2,9 +2,31 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"strings"
 )
+
+// HashError indicate that the hash for given statements doesn't match with hash in database
+type HashError struct {
+	StatementIndex int
+	ComputedHash   string
+	ExpectedHash   string
+}
+
+func (e *HashError) Error() string {
+	return fmt.Sprintf(
+		"hash doesn't not match, expected %s..., but got %s...",
+		e.ExpectedHash[:8], e.ComputedHash[:8],
+	)
+}
+
+// ErrInvalidAppID indicate that given application id and application id on database is not match
+var ErrInvalidAppID = fmt.Errorf("Invalid application_id on database")
+
+const stmtHashKeyFormat = "stmt_hash_%d"
 
 // Migrate do the sql migration
 func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string) error {
@@ -58,7 +80,7 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 		curAppID = appID
 	}
 	if curAppID != appID {
-		return fmt.Errorf("Invalid application_id on database")
+		return ErrInvalidAppID
 	}
 
 	var userVersion int
@@ -67,9 +89,48 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 	).Scan(&userVersion); err != nil {
 		return err
 	}
+
+	for i := 0; i < userVersion; i++ {
+		key := fmt.Sprintf(stmtHashKeyFormat, i)
+		statement := statements[i]
+		computedHash := computeHash(statement)
+		var expectedHash string
+		if err := conn.QueryRowContext(ctx,
+			"select value from __meta where key=$1;",
+			key,
+		).Scan(&expectedHash); err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if expectedHash == "" {
+			if _, err := conn.ExecContext(ctx,
+				"insert into __meta(key, value) values($1, $2);",
+				key, computedHash,
+			); err != nil {
+				return err
+			}
+			expectedHash = computedHash
+		}
+		if expectedHash != computedHash {
+			return &HashError{
+				StatementIndex: i,
+				ExpectedHash:   expectedHash,
+				ComputedHash:   computedHash,
+			}
+		}
+	}
+
 	for ; userVersion < len(statements); userVersion++ {
 		statement := statements[userVersion]
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+
+		computedHash := computeHash(statement)
+		key := fmt.Sprintf(stmtHashKeyFormat, userVersion)
+		if _, err := conn.ExecContext(ctx,
+			"insert into __meta(key, value) values($1, $2);",
+			key, computedHash,
+		); err != nil {
 			return err
 		}
 	}
@@ -86,4 +147,33 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 	committed = true
 
 	return nil
+}
+
+func computeHash(input string) string {
+	inputLines := strings.Split(input, "\n")
+	outputLines := make([]string, 0, len(inputLines))
+
+	first := true
+	for _, line := range inputLines {
+		if first {
+			tmp := strings.TrimSpace(line)
+			if len(tmp) == 0 || strings.HasPrefix(tmp, "--") {
+				continue
+			}
+		}
+		first = false
+		outputLines = append(outputLines, line)
+	}
+
+	for i := len(outputLines) - 1; i >= 0; i-- {
+		tmp := strings.TrimSpace(outputLines[i])
+		if len(tmp) == 0 || strings.HasPrefix(tmp, "--") {
+			outputLines = outputLines[:i]
+		} else {
+			break
+		}
+	}
+
+	output := sha256.Sum256([]byte(strings.Join(outputLines, "\n")))
+	return hex.EncodeToString(output[:])
 }
