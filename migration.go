@@ -11,20 +11,24 @@ import (
 
 // HashError indicate that the hash for given statements doesn't match with hash in database
 type HashError struct {
-	StatementIndex int
-	ComputedHash   string
-	ExpectedHash   string
+	StatementIndex     int
+	NormalizeStatement string
+	ComputedHash       string
+	ExpectedHash       string
 }
 
 func (e *HashError) Error() string {
-	return fmt.Sprintf(
-		"hash doesn't not match, expected %s..., but got %s...",
-		e.ExpectedHash[:8], e.ComputedHash[:8],
-	)
+	return "hash doesn't not match"
 }
 
-// ErrInvalidAppID indicate that given application id and application id on database is not match
-var ErrInvalidAppID = fmt.Errorf("Invalid application_id on database")
+// InvalidAppIDError indicate that given application id and application id on database doesn't not match
+type InvalidAppIDError struct {
+	AppID string
+}
+
+func (e *InvalidAppIDError) Error() string {
+	return "application id doesn't not match"
+}
 
 const stmtHashKeyFormat = "stmt_hash_%d"
 
@@ -40,7 +44,7 @@ func DryRun(ctx context.Context, db *sql.DB, appID string, statements []string) 
 
 func migrate(ctx context.Context, db *sql.DB, appID string, statements []string, dryrun bool) error {
 	if appID == "" {
-		panic("migrate: invalid params: appID can't be empty string")
+		return fmt.Errorf("appID cannot be empty string")
 	}
 
 	if _, err := db.ExecContext(ctx, ``+
@@ -89,7 +93,7 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 		curAppID = appID
 	}
 	if curAppID != appID {
-		return ErrInvalidAppID
+		return &InvalidAppIDError{AppID: curAppID}
 	}
 
 	var userVersion int
@@ -102,7 +106,8 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 	for i := 0; i < userVersion; i++ {
 		key := fmt.Sprintf(stmtHashKeyFormat, i)
 		statement := statements[i]
-		computedHash := ComputeHash(statement)
+		normalizeStatement := normalize(statement)
+		computedHash := computeHash(normalizeStatement)
 		var expectedHash string
 		if err := conn.QueryRowContext(ctx,
 			"select value from __meta where key=$1;",
@@ -121,9 +126,10 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 		}
 		if expectedHash != computedHash {
 			return &HashError{
-				StatementIndex: i,
-				ExpectedHash:   expectedHash,
-				ComputedHash:   computedHash,
+				StatementIndex:     i,
+				NormalizeStatement: normalizeStatement,
+				ExpectedHash:       expectedHash,
+				ComputedHash:       computedHash,
 			}
 		}
 	}
@@ -134,7 +140,7 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 			return err
 		}
 
-		computedHash := ComputeHash(statement)
+		computedHash := computeHash(normalize(statement))
 		key := fmt.Sprintf(stmtHashKeyFormat, userVersion)
 		if _, err := conn.ExecContext(ctx,
 			"insert into __meta(key, value) values($1, $2);",
@@ -162,8 +168,7 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 	return nil
 }
 
-// ComputeHash is used to compute hash of migration statement
-func ComputeHash(input string) string {
+func normalize(input string) string {
 	inputLines := strings.Split(input, "\n")
 	outputLines := make([]string, 0, len(inputLines))
 
@@ -188,6 +193,10 @@ func ComputeHash(input string) string {
 		}
 	}
 
-	output := sha256.Sum256([]byte(strings.Join(outputLines, "\n")))
+	return strings.Join(outputLines, "\n")
+}
+
+func computeHash(input string) string {
+	output := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(output[:])
 }
