@@ -93,7 +93,7 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 	for i := 0; i < userVersion; i++ {
 		key := fmt.Sprintf(stmtHashKeyFormat, i)
 		statement := statements[i]
-		computedHash := computeHash(statement)
+		computedHash := ComputeHash(statement)
 		var expectedHash string
 		if err := conn.QueryRowContext(ctx,
 			"select value from __meta where key=$1;",
@@ -125,7 +125,7 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 			return err
 		}
 
-		computedHash := computeHash(statement)
+		computedHash := ComputeHash(statement)
 		key := fmt.Sprintf(stmtHashKeyFormat, userVersion)
 		if _, err := conn.ExecContext(ctx,
 			"insert into __meta(key, value) values($1, $2);",
@@ -149,7 +149,8 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 	return nil
 }
 
-func computeHash(input string) string {
+// ComputeHash is used to compute hash of migration statement
+func ComputeHash(input string) string {
 	inputLines := strings.Split(input, "\n")
 	outputLines := make([]string, 0, len(inputLines))
 
