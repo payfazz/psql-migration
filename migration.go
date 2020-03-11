@@ -169,6 +169,8 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 }
 
 func normalize(input string) string {
+	// TODO(win): make better implementation
+
 	inputLines := strings.Split(input, "\n")
 	outputLines := make([]string, 0, len(inputLines))
 
