@@ -30,6 +30,15 @@ const stmtHashKeyFormat = "stmt_hash_%d"
 
 // Migrate do the sql migration
 func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string) error {
+	return migrate(ctx, db, appID, statements, false)
+}
+
+// DryRun do the sql migration but do not commit the changes, just check for error
+func DryRun(ctx context.Context, db *sql.DB, appID string, statements []string) error {
+	return migrate(ctx, db, appID, statements, true)
+}
+
+func migrate(ctx context.Context, db *sql.DB, appID string, statements []string, dryrun bool) error {
 	if appID == "" {
 		panic("migrate: invalid params: appID can't be empty string")
 	}
@@ -141,7 +150,11 @@ func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string)
 		return err
 	}
 
-	if _, err := conn.ExecContext(ctx, "commit"); err != nil {
+	if dryrun {
+		return nil
+	}
+
+	if _, err := conn.ExecContext(ctx, "commit;"); err != nil {
 		return err
 	}
 	committed = true

@@ -1,3 +1,3 @@
 module github.com/payfazz/psql-migration
 
-go 1.13
+go 1.14
