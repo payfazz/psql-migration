@@ -140,6 +140,19 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return err
 		}
+
+		computedHash, err := computeHash(statement)
+		if err != nil {
+			return &HashError{StatementIndex: userVersion}
+		}
+
+		key := fmt.Sprintf(stmtHashKeyFormat, userVersion)
+		if _, err := conn.ExecContext(ctx,
+			"insert into __meta(key, value) values($1, $2);",
+			key, computedHash,
+		); err != nil {
+			return err
+		}
 	}
 
 	if _, err := conn.ExecContext(ctx,
