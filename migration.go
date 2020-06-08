@@ -2,19 +2,17 @@ package migration
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
-	"strings"
+
+	pg_query "github.com/lfittl/pg_query_go"
 )
 
 // HashError indicate that the hash for given statements doesn't match with hash in database
 type HashError struct {
-	StatementIndex     int
-	NormalizeStatement string
-	ComputedHash       string
-	ExpectedHash       string
+	StatementIndex int
+	StatementHash  string
+	ExpectedHash   string
 }
 
 func (e *HashError) Error() string {
@@ -44,7 +42,7 @@ func DryRun(ctx context.Context, db *sql.DB, appID string, statements []string) 
 
 func migrate(ctx context.Context, db *sql.DB, appID string, statements []string, dryrun bool) error {
 	if appID == "" {
-		return fmt.Errorf("appID cannot be empty string")
+		panic(fmt.Errorf("appID cannot be empty string"))
 	}
 
 	if _, err := db.ExecContext(ctx, ``+
@@ -106,8 +104,11 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 	for i := 0; i < userVersion; i++ {
 		key := fmt.Sprintf(stmtHashKeyFormat, i)
 		statement := statements[i]
-		normalizeStatement := normalize(statement)
-		computedHash := computeHash(normalizeStatement)
+		statementHash, err := computeHash(statement)
+		if err != nil {
+			return &HashError{StatementIndex: i}
+		}
+
 		var expectedHash string
 		if err := conn.QueryRowContext(ctx,
 			"select value from __meta where key=$1;",
@@ -118,18 +119,18 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 		if expectedHash == "" {
 			if _, err := conn.ExecContext(ctx,
 				"insert into __meta(key, value) values($1, $2);",
-				key, computedHash,
+				key, statementHash,
 			); err != nil {
 				return err
 			}
-			expectedHash = computedHash
+			expectedHash = statementHash
 		}
-		if expectedHash != computedHash {
+
+		if expectedHash != statementHash {
 			return &HashError{
-				StatementIndex:     i,
-				NormalizeStatement: normalizeStatement,
-				ExpectedHash:       expectedHash,
-				ComputedHash:       computedHash,
+				StatementIndex: i,
+				StatementHash:  statementHash,
+				ExpectedHash:   expectedHash,
 			}
 		}
 	}
@@ -139,16 +140,8 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return err
 		}
-
-		computedHash := computeHash(normalize(statement))
-		key := fmt.Sprintf(stmtHashKeyFormat, userVersion)
-		if _, err := conn.ExecContext(ctx,
-			"insert into __meta(key, value) values($1, $2);",
-			key, computedHash,
-		); err != nil {
-			return err
-		}
 	}
+
 	if _, err := conn.ExecContext(ctx,
 		"update __meta set value=$1 where key='user_version';",
 		userVersion,
@@ -168,37 +161,6 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 	return nil
 }
 
-func normalize(input string) string {
-	// TODO(win): make better implementation
-
-	inputLines := strings.Split(input, "\n")
-	outputLines := make([]string, 0, len(inputLines))
-
-	first := true
-	for _, line := range inputLines {
-		if first {
-			tmp := strings.TrimSpace(line)
-			if len(tmp) == 0 || strings.HasPrefix(tmp, "--") {
-				continue
-			}
-		}
-		first = false
-		outputLines = append(outputLines, line)
-	}
-
-	for i := len(outputLines) - 1; i >= 0; i-- {
-		tmp := strings.TrimSpace(outputLines[i])
-		if len(tmp) == 0 || strings.HasPrefix(tmp, "--") {
-			outputLines = outputLines[:i]
-		} else {
-			break
-		}
-	}
-
-	return strings.Join(outputLines, "\n")
-}
-
-func computeHash(input string) string {
-	output := sha256.Sum256([]byte(input))
-	return hex.EncodeToString(output[:])
+func computeHash(input string) (string, error) {
+	return pg_query.FastFingerprint(input)
 }
