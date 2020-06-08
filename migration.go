@@ -28,6 +28,15 @@ func (e *InvalidAppIDError) Error() string {
 	return "application id doesn't not match"
 }
 
+// MissingStatementError indicate that there is some statement missing
+type MissingStatementError struct {
+	Needed int
+}
+
+func (e *MissingStatementError) Error() string {
+	return "missing statement"
+}
+
 const stmtHashKeyFormat = "stmt_hash_%d"
 
 // Migrate do the sql migration
@@ -99,6 +108,10 @@ func migrate(ctx context.Context, db *sql.DB, appID string, statements []string,
 		"select value from __meta where key='user_version';",
 	).Scan(&userVersion); err != nil {
 		return err
+	}
+
+	if userVersion > len(statements) {
+		return &MissingStatementError{Needed: userVersion}
 	}
 
 	for i := 0; i < userVersion; i++ {
