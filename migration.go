@@ -8,7 +8,8 @@ import (
 	pg_query "github.com/lfittl/pg_query_go"
 )
 
-// HashError indicate that the hash for given statements doesn't match with hash in database
+// HashError indicate that the hash for given statements doesn't match with hash in database,
+// if StatementHash is empty string it mean that fail to calculate the hash of the statement
 type HashError struct {
 	StatementIndex int
 	StatementHash  string
