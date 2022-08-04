@@ -1,17 +1,11 @@
 package migration
 
-import "embed"
+import (
+	"context"
 
-// Migrate is the shortcut to create a migration object, and run it.
-func Migrate(source embed.FS, target string) ([]string, error) {
-	m, err := New(source, target)
-	if err != nil {
-		return nil, err
-	}
-	defer m.Close()
-
-	return m.Run()
-}
+	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v4"
+)
 
 type Item struct {
 	ID   string
@@ -27,4 +21,42 @@ func (m *Migration) All() []Item {
 		})
 	}
 	return r
+}
+
+var bgCtx = context.Background()
+
+func setupConn(target string, onNestedTx func()) (*pgx.Conn, error) {
+	config, err := pgx.ParseConfig(target)
+	if err != nil {
+		return nil, err
+	}
+	if onNestedTx != nil {
+		config.OnNotice = func(pc *pgconn.PgConn, n *pgconn.Notice) {
+			if n.Code == "25001" {
+				onNestedTx()
+			}
+		}
+	}
+
+	conn, err := pgx.ConnectConfig(bgCtx, config)
+	if err != nil {
+		return nil, err
+	}
+	connMoved := false
+	defer func() {
+		if !connMoved {
+			conn.Close(bgCtx)
+		}
+	}()
+
+	if _, err := conn.Exec(bgCtx, ``+
+		`create schema if not exists go_migration;`+
+		`create table if not exists go_migration.meta`+
+		`(id text primary key, hash text, at timestamp with time zone default now())`,
+	); err != nil {
+		return nil, err
+	}
+
+	connMoved = true
+	return conn, nil
 }

@@ -1,14 +1,12 @@
 package migration
 
 import (
-	"context"
 	"embed"
 	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
 
-	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v4"
 )
 
@@ -19,24 +17,17 @@ type entry struct {
 }
 
 type Migration struct {
-	conn       *pgx.Conn
 	entries    []entry
 	revEntries map[string]int
-
-	nestedTxDetected bool
 }
 
-var bgCtx = context.Background()
-
-// New return new Migration connection.
-//
-// do not forget to call Close.
+// New return new Migration object.
 //
 // source must contains exactly one directory, and that directory must contains only *.sql file.
 // each sql file must have lowercase name.
 //
 // the migration is sorted by sql file name.
-func New(source embed.FS, targetConn string) (*Migration, error) {
+func New(source embed.FS) *Migration {
 	list, err := fs.ReadDir(source, ".")
 	if err != nil {
 		panic(err)
@@ -94,66 +85,26 @@ func New(source embed.FS, targetConn string) (*Migration, error) {
 		m.revEntries[e.id] = i
 	}
 
-	config, err := pgx.ParseConfig(targetConn)
-	if err != nil {
-		return nil, err
-	}
-
-	config.OnNotice = m.onPgxNotice
-
-	conn, err := pgx.ConnectConfig(bgCtx, config)
-	if err != nil {
-		return nil, err
-	}
-	connMoved := false
-	defer func() {
-		if !connMoved {
-			conn.Close(bgCtx)
-		}
-	}()
-
-	m.conn = conn
-	connMoved = true
-
-	return m, nil
-}
-
-// Close the underlying connection.
-func (m *Migration) Close() error {
-	return m.conn.Close(bgCtx)
-}
-
-func (m *Migration) onPgxNotice(c *pgconn.PgConn, n *pgconn.Notice) {
-	if m.conn.PgConn() != c {
-		panic("wrong conn")
-	}
-	m.nestedTxDetected = n.Code == "25001"
-}
-
-func (m *Migration) ensureMetatable() error {
-	if _, err := m.conn.Exec(bgCtx, ``+
-		`create schema if not exists `+
-		`go_migration; `+
-		`create table if not exists `+
-		`go_migration.meta(id text primary key, hash text, at timestamp with time zone default now());`,
-	); err != nil {
-		return err
-	}
-	return nil
+	return m
 }
 
 // Check the current state of the database.
 //
-// will return list of migration that need to be run.
+// will return list of migration that need to be executed.
 //
 // also will return *MismatchHashError error if the database already execute a migration file
-// but it has different hash with source
-func (m *Migration) Check() ([]string, error) {
-	if err := m.ensureMetatable(); err != nil {
+// but it has different hash with source.
+func (m *Migration) Check(target string) ([]string, error) {
+	conn, err := setupConn(target, nil)
+	if err != nil {
 		return nil, err
 	}
+	defer conn.Close(bgCtx)
+	return m.check(conn)
+}
 
-	rows, err := m.conn.Query(bgCtx, ``+
+func (m *Migration) check(conn *pgx.Conn) ([]string, error) {
+	rows, err := conn.Query(bgCtx, ``+
 		`select id, hash from go_migration.meta`,
 	)
 	if err != nil {
@@ -197,47 +148,50 @@ func (m *Migration) Check() ([]string, error) {
 // will return list of migration that executed.
 //
 // also will return *MismatchHashError error if the database already execute a migration file
-// but it has different hash with source
-func (m *Migration) Run() ([]string, error) {
-	if err := m.ensureMetatable(); err != nil {
+// but it has different hash with source.
+func (m *Migration) Run(target string) ([]string, error) {
+	nestedTxDetected := false
+	conn, err := setupConn(target, func() { nestedTxDetected = true })
+	if err != nil {
 		return nil, err
 	}
+	defer conn.Close(bgCtx)
 
-	if _, err := m.conn.Exec(bgCtx, ``+
-		`begin isolation level serializable; `+
-		`lock table go_migration.meta in access exclusive mode;`,
+	if _, err := conn.Exec(bgCtx, ``+
+		`begin isolation level serializable;`+
+		`lock table go_migration.meta in access exclusive mode`,
 	); err != nil {
 		return nil, err
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			m.conn.Exec(bgCtx, `rollback;`)
+			conn.Exec(bgCtx, `rollback`)
 		}
 	}()
 
-	list, err := m.Check()
+	list, err := m.check(conn)
 	if err != nil {
 		return nil, err
 	}
 	for _, l := range list {
 		e := m.entries[m.revEntries[l]]
-		m.nestedTxDetected = false
-		if _, err := m.conn.Exec(bgCtx, e.statement); err != nil {
+		nestedTxDetected = false
+		if _, err := conn.Exec(bgCtx, e.statement); err != nil {
 			return nil, fmt.Errorf("cannot execute \"%s\": %w", e.id, err)
 		}
-		if m.nestedTxDetected {
+		if nestedTxDetected {
 			return nil, fmt.Errorf("cannot execute \"%s\": migration statement is already in transaction", e.id)
 		}
-		if _, err := m.conn.Exec(bgCtx, ``+
-			`insert into go_migration.meta(id, hash) values ($1, $2);`,
+		if _, err := conn.Exec(bgCtx, ``+
+			`insert into go_migration.meta(id, hash) values ($1, $2)`,
 			e.id, e.hash,
 		); err != nil {
 			return nil, err
 		}
 	}
 
-	if _, err := m.conn.Exec(bgCtx, `commit;`); err != nil {
+	if _, err := conn.Exec(bgCtx, `commit`); err != nil {
 		return nil, err
 	}
 	committed = true
