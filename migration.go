@@ -2,192 +2,241 @@ package migration
 
 import (
 	"context"
-	"database/sql"
+	"embed"
 	"fmt"
+	"io/fs"
+	"sort"
+	"strings"
 
-	pg_query "github.com/lfittl/pg_query_go"
+	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v4"
 )
 
-// HashError indicate that the hash for given statements doesn't match with hash in database,
-// if StatementHash is empty string it mean that fail to calculate the hash of the statement
-type HashError struct {
-	StatementIndex int
-	StatementHash  string
-	ExpectedHash   string
+type entry struct {
+	id        string
+	statement string
+	hash      string
 }
 
-func (e *HashError) Error() string {
-	return "hash doesn't not match"
+type Migration struct {
+	conn       *pgx.Conn
+	entries    []entry
+	revEntries map[string]int
+
+	nestedTxDetected bool
 }
 
-// InvalidAppIDError indicate that given application id and application id on database doesn't not match
-type InvalidAppIDError struct {
-	AppID string
-}
-
-func (e *InvalidAppIDError) Error() string {
-	return "application id doesn't not match"
-}
-
-// MissingStatementError indicate that there is some statement missing
-type MissingStatementError struct {
-	Needed int
-}
-
-func (e *MissingStatementError) Error() string {
-	return "missing statement"
-}
-
-const stmtHashKeyFormat = "stmt_hash_%d"
-
-// Migrate do the sql migration
-func Migrate(ctx context.Context, db *sql.DB, appID string, statements []string) error {
-	return migrate(ctx, db, appID, statements, false)
-}
-
-// DryRun do the sql migration but do not commit the changes, just check for error
-func DryRun(ctx context.Context, db *sql.DB, appID string, statements []string) error {
-	return migrate(ctx, db, appID, statements, true)
-}
-
-func migrate(ctx context.Context, db *sql.DB, appID string, statements []string, dryrun bool) error {
-	if appID == "" {
-		panic(fmt.Errorf("appID cannot be empty string"))
-	}
-
-	if _, err := db.ExecContext(ctx, ``+
-		`create table if not exists `+
-		`__meta(key text primary key, value text);`+
-
-		`with d(k, v) as (values ('application_id', ''), ('user_version', '0')) `+
-		`insert into __meta(key, value) `+
-		`select k, v from d where not exists (select 1 from __meta where key = k);`,
-	); err != nil {
-		return err
-	}
-
-	conn, err := db.Conn(ctx)
+// New return new Migration connection.
+//
+// do not forget to call Close.
+//
+// source must contains exactly one directory, and that directory must contains only *.sql file.
+// each sql file must have lowercase name.
+//
+// the migration is sorted by sql file name.
+func New(ctx context.Context, source embed.FS, targetConn string) (*Migration, error) {
+	list, err := fs.ReadDir(source, ".")
 	if err != nil {
-		return err
+		panic(err)
 	}
-	defer conn.Close()
+	if len(list) != 1 || !list[0].IsDir() {
+		panic("migration: source should have single dir in the root")
+	}
 
-	if _, err := conn.ExecContext(ctx, ``+
-		`begin isolation level serializable;`+
-		`lock table __meta in access exclusive mode;`,
+	sub, err := fs.Sub(source, list[0].Name())
+	if err != nil {
+		panic(err)
+	}
+
+	m := &Migration{revEntries: make(map[string]int)}
+
+	if err := fs.WalkDir(sub, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			panic(err)
+		}
+		if path == "." {
+			return nil
+		}
+
+		name := d.Name()
+		if d.IsDir() {
+			panic(fmt.Sprintf("migration: cannot include directory: %s", name))
+		}
+		if !strings.HasSuffix(name, ".sql") {
+			panic(fmt.Sprintf("migration: must ending with .sql: %s", name))
+		}
+		if strings.ToLower(name) != name {
+			panic(fmt.Sprintf("migration: must have lowercase name: %s", name))
+		}
+
+		data, err := fs.ReadFile(sub, name)
+		if err != nil {
+			panic(err)
+		}
+
+		stmt := string(data)
+		e := entry{name, stmt, hash(stmt)}
+		m.entries = append(m.entries, e)
+
+		return nil
+	}); err != nil {
+		panic(err)
+	}
+
+	sort.Slice(m.entries, func(i, j int) bool { return m.entries[i].id < m.entries[j].id })
+
+	for i, e := range m.entries {
+		if _, ok := m.revEntries[e.id]; ok {
+			panic(fmt.Sprintf("migration: duplicate entry: %s", e.id))
+		}
+		m.revEntries[e.id] = i
+	}
+
+	config, err := pgx.ParseConfig(targetConn)
+	if err != nil {
+		return nil, err
+	}
+
+	config.OnNotice = m.onPgxNotice
+
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	connMoved := false
+	defer func() {
+		if !connMoved {
+			conn.Close(ctx)
+		}
+	}()
+
+	m.conn = conn
+	connMoved = true
+
+	return m, nil
+}
+
+// Close the underlying connection.
+func (m *Migration) Close(ctx context.Context) error {
+	return m.conn.Close(ctx)
+}
+
+func (m *Migration) onPgxNotice(c *pgconn.PgConn, n *pgconn.Notice) {
+	if m.conn.PgConn() != c {
+		panic("wrong conn")
+	}
+	m.nestedTxDetected = n.Code == "25001"
+}
+
+func (m *Migration) ensureMetatable(ctx context.Context) error {
+	if _, err := m.conn.Exec(ctx, ``+
+		`create table if not exists `+
+		`__go_migration_meta(id text primary key, hash text, at timestamp with time zone default now())`,
 	); err != nil {
 		return err
+	}
+	return nil
+}
+
+// Check the current state of the database.
+//
+// will return list of migration that need to be run.
+//
+// also will return *MismatchHashError error if the database already execute a migration file
+// but it has different hash with source
+func (m *Migration) Check(ctx context.Context) ([]string, error) {
+	if err := m.ensureMetatable(ctx); err != nil {
+		return nil, err
+	}
+
+	rows, err := m.conn.Query(ctx, ``+
+		`select id, hash from __go_migration_meta`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	alreadyInDB := make(map[string]struct{})
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			return nil, err
+		}
+		i, ok := m.revEntries[id]
+		if !ok {
+			return nil, &MismatchHashError{ID: id, HashInDB: hash}
+		}
+		e := m.entries[i]
+		if e.hash != hash {
+			return nil, &MismatchHashError{ID: id, CurrentHash: e.hash, HashInDB: hash}
+		}
+		alreadyInDB[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var ret []string
+	for _, e := range m.entries {
+		if _, ok := alreadyInDB[e.id]; ok {
+			continue
+		}
+		ret = append(ret, e.id)
+	}
+
+	return ret, nil
+}
+
+// Run the migration.
+//
+// will return list of migration that executed.
+//
+// also will return *MismatchHashError error if the database already execute a migration file
+// but it has different hash with source
+func (m *Migration) Run(ctx context.Context) ([]string, error) {
+	// if err := m.ensureMetatable(ctx, db); err != nil {
+	// 	return err
+	// }
+
+	if _, err := m.conn.Exec(ctx, ``+
+		`begin isolation level serializable; `+
+		`lock table __go_migration_meta in access exclusive mode;`,
+	); err != nil {
+		return nil, err
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			conn.ExecContext(ctx, "rollback;")
+			m.conn.Exec(ctx, `rollback;`)
 		}
 	}()
 
-	var curAppID string
-	if err := conn.QueryRowContext(ctx,
-		"select value from __meta where key='application_id';",
-	).Scan(&curAppID); err != nil {
-		return err
+	list, err := m.Check(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if curAppID == "" {
-		if _, err := conn.ExecContext(ctx,
-			"update __meta set value=$1 where key='application_id';",
-			appID,
+	for _, l := range list {
+		e := m.entries[m.revEntries[l]]
+		m.nestedTxDetected = false
+		if _, err := m.conn.Exec(ctx, e.statement); err != nil {
+			return nil, fmt.Errorf("cannot execute \"%s\": %w", e.id, err)
+		}
+		if m.nestedTxDetected {
+			return nil, fmt.Errorf("cannot execute \"%s\": migration statement is already in transaction", e.id)
+		}
+		if _, err := m.conn.Exec(ctx, ``+
+			`insert into __go_migration_meta(id, hash) values ($1, $2);`,
+			e.id, e.hash,
 		); err != nil {
-			return err
-		}
-		curAppID = appID
-	}
-	if curAppID != appID {
-		return &InvalidAppIDError{AppID: curAppID}
-	}
-
-	var userVersion int
-	if err := conn.QueryRowContext(ctx,
-		"select value from __meta where key='user_version';",
-	).Scan(&userVersion); err != nil {
-		return err
-	}
-
-	if userVersion > len(statements) {
-		return &MissingStatementError{Needed: userVersion}
-	}
-
-	for i := 0; i < userVersion; i++ {
-		key := fmt.Sprintf(stmtHashKeyFormat, i)
-		statement := statements[i]
-		statementHash, err := computeHash(statement)
-		if err != nil {
-			return &HashError{StatementIndex: i}
-		}
-
-		var expectedHash string
-		if err := conn.QueryRowContext(ctx,
-			"select value from __meta where key=$1;",
-			key,
-		).Scan(&expectedHash); err != nil && err != sql.ErrNoRows {
-			return err
-		}
-		if expectedHash == "" {
-			if _, err := conn.ExecContext(ctx,
-				"insert into __meta(key, value) values($1, $2);",
-				key, statementHash,
-			); err != nil {
-				return err
-			}
-			expectedHash = statementHash
-		}
-
-		if expectedHash != statementHash {
-			return &HashError{
-				StatementIndex: i,
-				StatementHash:  statementHash,
-				ExpectedHash:   expectedHash,
-			}
+			return nil, err
 		}
 	}
 
-	for ; userVersion < len(statements); userVersion++ {
-		statement := statements[userVersion]
-		if _, err := conn.ExecContext(ctx, statement); err != nil {
-			return err
-		}
-
-		computedHash, err := computeHash(statement)
-		if err != nil {
-			return &HashError{StatementIndex: userVersion}
-		}
-
-		key := fmt.Sprintf(stmtHashKeyFormat, userVersion)
-		if _, err := conn.ExecContext(ctx,
-			"insert into __meta(key, value) values($1, $2);",
-			key, computedHash,
-		); err != nil {
-			return err
-		}
-	}
-
-	if _, err := conn.ExecContext(ctx,
-		"update __meta set value=$1 where key='user_version';",
-		userVersion,
-	); err != nil {
-		return err
-	}
-
-	if dryrun {
-		return nil
-	}
-
-	if _, err := conn.ExecContext(ctx, "commit;"); err != nil {
-		return err
+	if _, err := m.conn.Exec(ctx, `commit;`); err != nil {
+		return nil, err
 	}
 	committed = true
 
-	return nil
-}
-
-func computeHash(input string) (string, error) {
-	return pg_query.FastFingerprint(input)
+	return list, nil
 }
