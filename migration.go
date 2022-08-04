@@ -130,8 +130,10 @@ func (m *Migration) onPgxNotice(c *pgconn.PgConn, n *pgconn.Notice) {
 
 func (m *Migration) ensureMetatable(ctx context.Context) error {
 	if _, err := m.conn.Exec(ctx, ``+
+		`create schema if not exists `+
+		`go_migration; `+
 		`create table if not exists `+
-		`__go_migration_meta(id text primary key, hash text, at timestamp with time zone default now())`,
+		`go_migration.meta(id text primary key, hash text, at timestamp with time zone default now());`,
 	); err != nil {
 		return err
 	}
@@ -150,7 +152,7 @@ func (m *Migration) Check(ctx context.Context) ([]string, error) {
 	}
 
 	rows, err := m.conn.Query(ctx, ``+
-		`select id, hash from __go_migration_meta`,
+		`select id, hash from go_migration.meta`,
 	)
 	if err != nil {
 		return nil, err
@@ -201,7 +203,7 @@ func (m *Migration) Run(ctx context.Context) ([]string, error) {
 
 	if _, err := m.conn.Exec(ctx, ``+
 		`begin isolation level serializable; `+
-		`lock table __go_migration_meta in access exclusive mode;`,
+		`lock table go_migration.meta in access exclusive mode;`,
 	); err != nil {
 		return nil, err
 	}
@@ -226,7 +228,7 @@ func (m *Migration) Run(ctx context.Context) ([]string, error) {
 			return nil, fmt.Errorf("cannot execute \"%s\": migration statement is already in transaction", e.id)
 		}
 		if _, err := m.conn.Exec(ctx, ``+
-			`insert into __go_migration_meta(id, hash) values ($1, $2);`,
+			`insert into go_migration.meta(id, hash) values ($1, $2);`,
 			e.id, e.hash,
 		); err != nil {
 			return nil, err
