@@ -26,6 +26,8 @@ type Migration struct {
 	nestedTxDetected bool
 }
 
+var bgCtx = context.Background()
+
 // New return new Migration connection.
 //
 // do not forget to call Close.
@@ -34,7 +36,7 @@ type Migration struct {
 // each sql file must have lowercase name.
 //
 // the migration is sorted by sql file name.
-func New(ctx context.Context, source embed.FS, targetConn string) (*Migration, error) {
+func New(source embed.FS, targetConn string) (*Migration, error) {
 	list, err := fs.ReadDir(source, ".")
 	if err != nil {
 		panic(err)
@@ -99,14 +101,14 @@ func New(ctx context.Context, source embed.FS, targetConn string) (*Migration, e
 
 	config.OnNotice = m.onPgxNotice
 
-	conn, err := pgx.ConnectConfig(ctx, config)
+	conn, err := pgx.ConnectConfig(bgCtx, config)
 	if err != nil {
 		return nil, err
 	}
 	connMoved := false
 	defer func() {
 		if !connMoved {
-			conn.Close(ctx)
+			conn.Close(bgCtx)
 		}
 	}()
 
@@ -117,8 +119,8 @@ func New(ctx context.Context, source embed.FS, targetConn string) (*Migration, e
 }
 
 // Close the underlying connection.
-func (m *Migration) Close(ctx context.Context) error {
-	return m.conn.Close(ctx)
+func (m *Migration) Close() error {
+	return m.conn.Close(bgCtx)
 }
 
 func (m *Migration) onPgxNotice(c *pgconn.PgConn, n *pgconn.Notice) {
@@ -128,30 +130,23 @@ func (m *Migration) onPgxNotice(c *pgconn.PgConn, n *pgconn.Notice) {
 	m.nestedTxDetected = n.Code == "25001"
 }
 
-func (m *Migration) ensureMetatable(ctx context.Context) error {
-	if _, err := m.conn.Exec(ctx, ``+
-		`create schema if not exists `+
-		`go_migration; `+
-		`create table if not exists `+
-		`go_migration.meta(id text primary key, hash text, at timestamp with time zone default now());`,
-	); err != nil {
-		return err
-	}
-	return nil
-}
-
 // Check the current state of the database.
 //
 // will return list of migration that need to be run.
 //
 // also will return *MismatchHashError error if the database already execute a migration file
 // but it has different hash with source
-func (m *Migration) Check(ctx context.Context) ([]string, error) {
-	if err := m.ensureMetatable(ctx); err != nil {
+func (m *Migration) Check() ([]string, error) {
+	if _, err := m.conn.Exec(bgCtx, ``+
+		`create schema if not exists `+
+		`go_migration; `+
+		`create table if not exists `+
+		`go_migration.meta(id text primary key, hash text, at timestamp with time zone default now());`,
+	); err != nil {
 		return nil, err
 	}
 
-	rows, err := m.conn.Query(ctx, ``+
+	rows, err := m.conn.Query(bgCtx, ``+
 		`select id, hash from go_migration.meta`,
 	)
 	if err != nil {
@@ -196,12 +191,8 @@ func (m *Migration) Check(ctx context.Context) ([]string, error) {
 //
 // also will return *MismatchHashError error if the database already execute a migration file
 // but it has different hash with source
-func (m *Migration) Run(ctx context.Context) ([]string, error) {
-	if err := m.ensureMetatable(ctx); err != nil {
-		return nil, err
-	}
-
-	if _, err := m.conn.Exec(ctx, ``+
+func (m *Migration) Run() ([]string, error) {
+	if _, err := m.conn.Exec(bgCtx, ``+
 		`begin isolation level serializable; `+
 		`lock table go_migration.meta in access exclusive mode;`,
 	); err != nil {
@@ -210,24 +201,24 @@ func (m *Migration) Run(ctx context.Context) ([]string, error) {
 	committed := false
 	defer func() {
 		if !committed {
-			m.conn.Exec(ctx, `rollback;`)
+			m.conn.Exec(bgCtx, `rollback;`)
 		}
 	}()
 
-	list, err := m.Check(ctx)
+	list, err := m.Check()
 	if err != nil {
 		return nil, err
 	}
 	for _, l := range list {
 		e := m.entries[m.revEntries[l]]
 		m.nestedTxDetected = false
-		if _, err := m.conn.Exec(ctx, e.statement); err != nil {
+		if _, err := m.conn.Exec(bgCtx, e.statement); err != nil {
 			return nil, fmt.Errorf("cannot execute \"%s\": %w", e.id, err)
 		}
 		if m.nestedTxDetected {
 			return nil, fmt.Errorf("cannot execute \"%s\": migration statement is already in transaction", e.id)
 		}
-		if _, err := m.conn.Exec(ctx, ``+
+		if _, err := m.conn.Exec(bgCtx, ``+
 			`insert into go_migration.meta(id, hash) values ($1, $2);`,
 			e.id, e.hash,
 		); err != nil {
@@ -235,7 +226,7 @@ func (m *Migration) Run(ctx context.Context) ([]string, error) {
 		}
 	}
 
-	if _, err := m.conn.Exec(ctx, `commit;`); err != nil {
+	if _, err := m.conn.Exec(bgCtx, `commit;`); err != nil {
 		return nil, err
 	}
 	committed = true
