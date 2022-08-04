@@ -130,6 +130,18 @@ func (m *Migration) onPgxNotice(c *pgconn.PgConn, n *pgconn.Notice) {
 	m.nestedTxDetected = n.Code == "25001"
 }
 
+func (m *Migration) ensureMetatable() error {
+	if _, err := m.conn.Exec(bgCtx, ``+
+		`create schema if not exists `+
+		`go_migration; `+
+		`create table if not exists `+
+		`go_migration.meta(id text primary key, hash text, at timestamp with time zone default now());`,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Check the current state of the database.
 //
 // will return list of migration that need to be run.
@@ -137,12 +149,7 @@ func (m *Migration) onPgxNotice(c *pgconn.PgConn, n *pgconn.Notice) {
 // also will return *MismatchHashError error if the database already execute a migration file
 // but it has different hash with source
 func (m *Migration) Check() ([]string, error) {
-	if _, err := m.conn.Exec(bgCtx, ``+
-		`create schema if not exists `+
-		`go_migration; `+
-		`create table if not exists `+
-		`go_migration.meta(id text primary key, hash text, at timestamp with time zone default now());`,
-	); err != nil {
+	if err := m.ensureMetatable(); err != nil {
 		return nil, err
 	}
 
@@ -162,11 +169,11 @@ func (m *Migration) Check() ([]string, error) {
 		}
 		i, ok := m.revEntries[id]
 		if !ok {
-			return nil, &MismatchHashError{ID: id, HashInDB: hash}
+			return nil, &MismatchHashError{Item: Item{ID: id}, HashInDB: hash}
 		}
 		e := m.entries[i]
 		if e.hash != hash {
-			return nil, &MismatchHashError{ID: id, CurrentHash: e.hash, HashInDB: hash}
+			return nil, &MismatchHashError{Item: Item{ID: id, Hash: e.hash}, HashInDB: hash}
 		}
 		alreadyInDB[id] = struct{}{}
 	}
@@ -192,6 +199,10 @@ func (m *Migration) Check() ([]string, error) {
 // also will return *MismatchHashError error if the database already execute a migration file
 // but it has different hash with source
 func (m *Migration) Run() ([]string, error) {
+	if err := m.ensureMetatable(); err != nil {
+		return nil, err
+	}
+
 	if _, err := m.conn.Exec(bgCtx, ``+
 		`begin isolation level serializable; `+
 		`lock table go_migration.meta in access exclusive mode;`,

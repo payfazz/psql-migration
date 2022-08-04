@@ -3,9 +3,8 @@ package migration
 import "fmt"
 
 type MismatchHashError struct {
-	ID          string
-	CurrentHash string
-	HashInDB    string
+	Item
+	HashInDB string
 }
 
 func (d *MismatchHashError) Error() string {
