@@ -195,9 +195,9 @@ func (m *Migration) Check(ctx context.Context) ([]string, error) {
 // also will return *MismatchHashError error if the database already execute a migration file
 // but it has different hash with source
 func (m *Migration) Run(ctx context.Context) ([]string, error) {
-	// if err := m.ensureMetatable(ctx, db); err != nil {
-	// 	return err
-	// }
+	if err := m.ensureMetatable(ctx); err != nil {
+		return nil, err
+	}
 
 	if _, err := m.conn.Exec(ctx, ``+
 		`begin isolation level serializable; `+
