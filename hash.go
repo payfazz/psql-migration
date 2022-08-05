@@ -7,7 +7,7 @@ import (
 	"unicode"
 )
 
-// this hash function will ignore case sensitivity, whitespace and sql comment
+// this hash function will ignore case sensitivity, whitespace, sql comment, last semicolon
 func hash(sql string) string {
 	sql = strings.ReplaceAll(sql, "\r\n", "\n")
 	sql = strings.ReplaceAll(sql, "\r", "\n")
@@ -24,6 +24,8 @@ func hash(sql string) string {
 	state := normal
 	blockCommentCount := 0
 
+	lastIsSemicolon := false
+
 	for i := 0; i < len(sql); i++ {
 		switch state {
 		case normal:
@@ -38,7 +40,15 @@ func hash(sql string) string {
 				state = blockComment
 				blockCommentCount = 1
 			default:
-				sum.Write([]byte{c})
+				if lastIsSemicolon {
+					sum.Write([]byte{';'})
+					lastIsSemicolon = false
+				}
+				if c == ';' {
+					lastIsSemicolon = true
+				} else {
+					sum.Write([]byte{c})
+				}
 			}
 
 		case lineComment:

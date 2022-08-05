@@ -47,6 +47,12 @@ func TestHash(t *testing.T) {
 			"abcdeg",
 			"a5a511ec5899cadabdc4e2bbefb106e731c718d2cc022cf0f48f364d51ed02bb",
 		},
+		{
+			"it should be ignoring last semicolon",
+			`ab;;;cd;`,
+			`ab;;;cd`,
+			"f3e0be0ac9b54823c959ffb60f5d3cea5d4a8f7219c1a9d7bd3dca5263749035",
+		},
 	}
 
 	for _, c := range tc {
