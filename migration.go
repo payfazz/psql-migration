@@ -177,7 +177,7 @@ func (m *Migration) Run(target string) ([]string, error) {
 	for _, l := range list {
 		e := m.entries[m.revEntries[l]]
 		nestedTxDetected = false
-		if _, err := conn.Exec(bgCtx, e.statement); err != nil {
+		if _, err := conn.Exec(bgCtx, `reset all;`+e.statement); err != nil {
 			return nil, fmt.Errorf("cannot execute \"%s\": %w", e.id, err)
 		}
 		if nestedTxDetected {
