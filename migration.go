@@ -120,7 +120,7 @@ func (m *Migration) check(conn *pgx.Conn) ([]string, error) {
 		}
 		i, ok := m.revEntries[id]
 		if !ok {
-			return nil, &MismatchHashError{Item: Item{ID: id}, HashInDB: hash}
+			continue
 		}
 		e := m.entries[i]
 		if e.hash != hash {
